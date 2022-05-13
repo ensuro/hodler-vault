@@ -1,0 +1,9 @@
+version: "3.4"
+
+services:
+  devenv:
+    build:
+      args:
+        DEV_ENV: "1"
+    volumes:
+      - ./:/code

@@ -1,0 +1,12 @@
+version: "3.4"
+
+services:
+  devenv:
+    command: "/bin/sh" #command: ["sh", "-c", "while [ 0 ]; do date; sleep 30 ; done"]
+    stdin_open: true # docker run -i
+    tty: true        # docker run -t
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: hodlervault
+    env_file: .env
