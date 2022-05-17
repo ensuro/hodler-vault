@@ -63,9 +63,12 @@ abstract contract AaveHodlerVault is Initializable, OwnableUpgradeable, UUPSUpgr
    * @param aaveAddrProv_ AAVE address provider, the index to access AAVE's contracts
    */
   /// @custom:oz-upgrades-unsafe-allow constructor
-  constructor(string memory name_, string memory symbol_, IPriceRiskModule priceInsurance_, ILendingPoolAddressesProvider aaveAddrProv_)
-    ERC4626(ERC20(address(priceInsurance_.asset())), name_, symbol_)
-  {
+  constructor(
+    string memory name_,
+    string memory symbol_,
+    IPriceRiskModule priceInsurance_,
+    ILendingPoolAddressesProvider aaveAddrProv_
+  ) ERC4626(ERC20(address(priceInsurance_.asset())), name_, symbol_) {
     ILendingPool aave = ILendingPool(aaveAddrProv_.getLendingPool());
     _aave = aave;
     _priceInsurance = priceInsurance_;
@@ -92,17 +95,21 @@ abstract contract AaveHodlerVault is Initializable, OwnableUpgradeable, UUPSUpgr
   }
 
   function totalAssets() public view override returns (uint256) {
-    uint256 assetInAave = IERC20Metadata(
-      _aave.getReserveData(address(asset)).aTokenAddress
-    ).balanceOf(address(this));
+    uint256 assetInAave = IERC20Metadata(_aave.getReserveData(address(asset)).aTokenAddress)
+      .balanceOf(address(this));
     uint256 borrowAssetDebt = _borrowAssetDebt();
     uint256 borrowAssetInvested = totalInvested();
     if (borrowAssetInvested >= borrowAssetDebt) {
-      return assetInAave + _convertBorrowToAsset(borrowAssetInvested - borrowAssetDebt);
+      return
+        assetInAave +
+        _convertBorrowToAsset(borrowAssetInvested - borrowAssetDebt).wadMul(
+          WadRayMath.wad() - _params.maxSlippage
+        );
     } else {
-      uint256 borrowDebtInAsset = _convertBorrowToAsset(borrowAssetDebt - borrowAssetInvested);
+      uint256 borrowDebtInAsset = _convertBorrowToAsset(borrowAssetDebt - borrowAssetInvested)
+        .wadMul(WadRayMath.wad() + _params.maxSlippage);
       if (borrowAssetDebt > assetInAave) {
-        return 0;   // MUST NOT REVERT, negative not supported
+        return 0; // MUST NOT REVERT, negative not supported
       } else {
         return assetInAave - borrowDebtInAsset;
       }
@@ -110,22 +117,23 @@ abstract contract AaveHodlerVault is Initializable, OwnableUpgradeable, UUPSUpgr
   }
 
   function beforeWithdraw(uint256 assets, uint256 shares) internal override {
-    uint256 assetInAave = IERC20Metadata(
-      _aave.getReserveData(address(asset)).aTokenAddress
-    ).balanceOf(address(this));
+    uint256 assetInAave = IERC20Metadata(_aave.getReserveData(address(asset)).aTokenAddress)
+      .balanceOf(address(this));
 
     // Withdraw operations must preserve or improve the health factor
     // Returns a fractor of stacked asset and swaps the remaining deinvesting the borrowAsset
-    uint256 toWithdrawFromAave = assetInAave * shares / totalSupply;
-    uint256 borrowAssetRepay = _borrowAssetDebt() * shares / totalSupply;
-    uint256 toAcquireAsset = (assets - toWithdrawFromAave).wadMul(WadRayMath.wad() + _params.maxSlippage);
+    uint256 toWithdrawFromAave = (assetInAave * shares) / totalSupply;
+    uint256 borrowAssetRepay = (_borrowAssetDebt() * shares) / totalSupply;
+    uint256 toAcquireAsset = (assets - toWithdrawFromAave).wadMul(
+      WadRayMath.wad() + _params.maxSlippage
+    );
     _deinvest(toAcquireAsset + borrowAssetRepay);
 
     // Swap
     address[] memory path = new address[](2);
     path[0] = address(asset);
     path[1] = address(_borrowAsset);
-    _borrowAsset.approve(address(_params.swapRouter), toAcquireAsset);  // TODO: infinite approval??
+    _borrowAsset.approve(address(_params.swapRouter), toAcquireAsset); // TODO: infinite approval??
     _params.swapRouter.swapTokensForExactTokens(
       assets - toWithdrawFromAave,
       toAcquireAsset,
@@ -134,7 +142,10 @@ abstract contract AaveHodlerVault is Initializable, OwnableUpgradeable, UUPSUpgr
       block.timestamp
     );
 
-    require(_borrowAsset.balanceOf(address(this)) >= borrowAssetRepay, "Can't decrease health factor");
+    require(
+      _borrowAsset.balanceOf(address(this)) >= borrowAssetRepay,
+      "Can't decrease health factor"
+    );
 
     _aave.repay(
       address(_borrowAsset),
@@ -167,23 +178,6 @@ abstract contract AaveHodlerVault is Initializable, OwnableUpgradeable, UUPSUpgr
   }
 
   /**
-   * @dev Withdraws the collateral
-   * @param amount Amount to transfer from sender's address
-   * @param doCheckpoint Boolean, indicates if calling checkpoint after the withdraw
-   */
-  function withdrawCollateral(uint256 amount, bool doCheckpoint)
-    external
-    onlyOwner
-    returns (uint256)
-  {
-    uint256 withdrawalAmount = _aave.withdraw(address(asset), amount, msg.sender);
-    if (doCheckpoint) {
-      checkpoint();
-    }
-    return withdrawalAmount;
-  }
-
-  /**
    * @dev Check actual health factor and based on the parameters acts in consequence
    */
   function checkpoint() public {
@@ -199,18 +193,6 @@ abstract contract AaveHodlerVault is Initializable, OwnableUpgradeable, UUPSUpgr
       _repay(_params.investHF);
       _insure();
     }
-  }
-
-  /**
-   * @dev Withdraws all the funds
-   */
-  function withdrawAll() external onlyOwner returns (uint256, uint256) {
-    _repay(type(uint256).max);
-    _deinvest(type(uint256).max);
-    uint256 withdrawalAmount = _aave.withdraw(address(asset), type(uint256).max, msg.sender);
-    uint256 borrowAssetAmount = _borrowAsset.balanceOf(address(this));
-    _borrowAsset.safeTransfer(msg.sender, borrowAssetAmount);
-    return (withdrawalAmount, borrowAssetAmount);
   }
 
   function _borrow(uint256 targetHF) internal {
@@ -242,7 +224,6 @@ abstract contract AaveHodlerVault is Initializable, OwnableUpgradeable, UUPSUpgr
     }
   }
 
-  // solhint-disable-next-line no-empty-blocks
   function _insure() internal {
     if (_activePolicyExpiration > (block.timestamp + _params.policyDuration / 1000)) {
       // Active policy not yet expired - _params.policyDuration is to allow "some" overlap (<90 secs in 1 day)
@@ -288,8 +269,8 @@ abstract contract AaveHodlerVault is Initializable, OwnableUpgradeable, UUPSUpgr
 
   function _liqThreshold() internal view returns (uint256) {
     return
-      (_aave.getReserveData(address(asset)).configuration.data &
-        ~LIQUIDATION_THRESHOLD_MASK) >> LIQUIDATION_THRESHOLD_START_BIT_POSITION;
+      (_aave.getReserveData(address(asset)).configuration.data & ~LIQUIDATION_THRESHOLD_MASK) >>
+      LIQUIDATION_THRESHOLD_START_BIT_POSITION;
   }
 
   function _calculateTargetDebt(uint256 targetHF)
@@ -298,10 +279,8 @@ abstract contract AaveHodlerVault is Initializable, OwnableUpgradeable, UUPSUpgr
     returns (uint256 currentDebt, uint256 targetDebt)
   {
     IPriceOracle oracle = IPriceOracle(_aave.getAddressesProvider().getPriceOracle());
-    uint256 collateralInEth = (IERC20Metadata(
-      _aave.getReserveData(address(asset)).aTokenAddress
-    ).balanceOf(address(this)) * oracle.getAssetPrice(address(asset))) /
-      10**asset.decimals();
+    uint256 collateralInEth = (IERC20Metadata(_aave.getReserveData(address(asset)).aTokenAddress)
+      .balanceOf(address(this)) * oracle.getAssetPrice(address(asset))) / 10**asset.decimals();
     targetDebt = collateralInEth.percentMul(_liqThreshold()).wadDiv(targetHF);
     return (_borrowAssetDebt(), targetDebt);
   }

@@ -3,8 +3,8 @@
   "version": "0.1.0",
   "description": "Set of contract that automates the strategy of holding crypto, at the same time investing borrowed stablecoins, with insurance-based liquidation protection",
   "scripts": {
-    "prettier": "prettier --write 'contracts/**/*.sol' 'interfaces/**/*.sol'",
-    "solhint": "solhint 'contracts/**/*.sol' 'interfaces/**/*.sol'"
+    "prettier": "prettier --write 'contracts/**/*.sol'",
+    "solhint": "solhint 'contracts/**/*.sol'"
   },
   "author": "",
   "license": "Apache-2.0",

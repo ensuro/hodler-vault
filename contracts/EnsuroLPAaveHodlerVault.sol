@@ -25,9 +25,12 @@ contract EnsuroLPAaveHodlerVault is AaveHodlerVault {
    * @param aaveAddrProv_ AAVE address provider, the index to access AAVE's contracts
    */
   /// @custom:oz-upgrades-unsafe-allow constructor
-  constructor(string memory name_, string memory symbol_, IPriceRiskModule priceInsurance_, ILendingPoolAddressesProvider aaveAddrProv_)
-    AaveHodlerVault(name_, symbol_, priceInsurance_, aaveAddrProv_)
-  {} // solhint-disable-line no-empty-blocks
+  constructor(
+    string memory name_,
+    string memory symbol_,
+    IPriceRiskModule priceInsurance_,
+    ILendingPoolAddressesProvider aaveAddrProv_
+  ) AaveHodlerVault(name_, symbol_, priceInsurance_, aaveAddrProv_) {} // solhint-disable-line no-empty-blocks
 
   /**
    * @dev Initializes the RiskModule
@@ -52,7 +55,7 @@ contract EnsuroLPAaveHodlerVault is AaveHodlerVault {
     return _eToken.policyPool().withdraw(IEToken(address(_eToken)), amount);
   }
 
-  function totalInvested() public override view returns (uint256) {
+  function totalInvested() public view override returns (uint256) {
     return IEToken(address(_eToken)).balanceOf(address(this));
   }
 }
