@@ -18,6 +18,7 @@
     "ethers": "^5.5.4",
     "hardhat": "^2.9.5",
     "hardhat-contract-sizer": "^2.5.1",
+    "hardhat-dependency-compiler": "^1.1.2",
     "hardhat-gas-reporter": "^1.0.8",
     "prettier": "^2.6.2",
     "prettier-plugin-solidity": "^1.0.0-beta.19",
@@ -27,9 +28,10 @@
   },
   "dependencies": {
     "@aave/protocol-v2": "https://github.com/gnarvaja/protocol-v2.git",
-    "@ensuro/core": "^1.2.0",
+    "@ensuro/core": "^1.2.1",
     "@openzeppelin/contracts": "^4.5.0",
     "@openzeppelin/contracts-upgradeable": "^4.5.2",
+    "@rari-capital/solmate": "^6.3.0",
     "@uniswap/v2-periphery": "^1.1.0-beta.0"
   }
 }

@@ -4,6 +4,8 @@ require("solidity-coverage");
 require("hardhat-contract-sizer");
 require('@openzeppelin/hardhat-upgrades');
 require("@nomiclabs/hardhat-etherscan");
+require('hardhat-dependency-compiler');
+
 
 // const { mnemonic } = require('./secrets.json');
 
@@ -49,6 +51,16 @@ module.exports = {
     alphaSort: true,
     runOnCompile: false,
     disambiguatePaths: false,
+  },
+  dependencyCompiler: {
+    paths: [
+      '@ensuro/core/contracts/PolicyPool.sol',
+      '@ensuro/core/contracts/PolicyPoolConfig.sol',
+      '@ensuro/core/contracts/PolicyNFT.sol',
+      '@ensuro/core/contracts/EToken.sol',
+      '@ensuro/core/contracts/Exchange.sol',
+      '@ensuro/core/contracts/extras/PriceRiskModule.sol',
+    ],
   },
   defaultNetwork: "hardhat",
   networks: {
