@@ -10,6 +10,7 @@ import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {ILendingPoolAddressesProvider} from "@aave/protocol-v2/contracts/interfaces/ILendingPoolAddressesProvider.sol";
 import {ILendingPool} from "@aave/protocol-v2/contracts/interfaces/ILendingPool.sol";
 import {IPriceOracle} from "@aave/protocol-v2/contracts/interfaces/IPriceOracle.sol";
+import {ILendingRateOracle} from "@aave/protocol-v2/contracts/interfaces/ILendingRateOracle.sol";
 import {PercentageMath} from "@aave/protocol-v2/contracts/protocol/libraries/math/PercentageMath.sol";
 import {IPriceRiskModule} from "@ensuro/core/contracts/extras/IPriceRiskModule.sol";
 import {Policy} from "@ensuro/core/contracts/Policy.sol";
@@ -31,6 +32,8 @@ abstract contract AaveHodlerVault is Initializable, OwnableUpgradeable, UUPSUpgr
   using WadRayMath for uint256;
   using PercentageMath for uint256;
   using FixedPointMathLib for uint256;
+
+  uint256 private constant SECONDS_PER_YEAR = 3600 * 24 * 365;
 
   uint256 private constant PAYOUT_BUFFER = 2e16; // 2%
   uint256 private constant LIQUIDATION_THRESHOLD_MASK = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF0000FFFF; // prettier-ignore
@@ -118,6 +121,18 @@ abstract contract AaveHodlerVault is Initializable, OwnableUpgradeable, UUPSUpgr
     }
   }
 
+  function expectedYield(uint40 duration) public view returns (uint256) {
+    uint256 borrowRate = _lendingRateOracle().getMarketBorrowRate(address(_borrowAsset));
+    uint256 borrowAssetNegYield = _borrowAssetDebt().wadMul(
+      borrowRate.mulDivDown(duration, SECONDS_PER_YEAR).rayToWad()
+    );
+    uint256 investmentYield = totalInvested().wadMul(
+      investYieldRate().mulDivDown(duration, SECONDS_PER_YEAR).rayToWad()
+    );
+    if (borrowAssetNegYield > investmentYield) return 0;
+    return investmentYield - borrowAssetNegYield;
+  }
+
   function beforeWithdraw(uint256 assets, uint256 shares) internal override {
     // TODO: forbit withdraw / deposit in the same tx, can be exploited
     uint256 assetInAave = IERC20Metadata(_aave.getReserveData(address(asset)).aTokenAddress)
@@ -200,14 +215,11 @@ abstract contract AaveHodlerVault is Initializable, OwnableUpgradeable, UUPSUpgr
 
   function _borrow(uint256 targetHF) internal {
     (uint256 currentDebt, uint256 targetDebt) = _calculateTargetDebt(targetHF);
-    if (targetDebt > currentDebt)
-      _aave.borrow(
-        address(_borrowAsset),
-        targetDebt - currentDebt,
-        BORROW_RATE_MODE,
-        0,
-        address(this)
-      );
+    if (targetDebt > currentDebt) _borrowAmount(targetDebt - currentDebt);
+  }
+
+  function _borrowAmount(uint256 amount) internal {
+    if (amount > 0) _aave.borrow(address(_borrowAsset), amount, BORROW_RATE_MODE, 0, address(this));
   }
 
   function _repay(uint256 targetHF) internal {
@@ -225,6 +237,10 @@ abstract contract AaveHodlerVault is Initializable, OwnableUpgradeable, UUPSUpgr
         address(this)
       );
     }
+  }
+
+  function _lendingRateOracle() internal view returns (ILendingRateOracle) {
+    return ILendingRateOracle(_aave.getAddressesProvider().getLendingRateOracle());
   }
 
   function _insure() internal {
@@ -251,10 +267,19 @@ abstract contract AaveHodlerVault is Initializable, OwnableUpgradeable, UUPSUpgr
       payout,
       uint40(block.timestamp) + _params.policyDuration
     );
-    // TODO: if policyPrice > expected return in _params.policyDuration (invest rate - _borrowAsset rate) then
-    // reduce the price scaling the payout. It won't take you to safeHF but at least will take you out of triggerHF
-
     if (policyPrice == 0) return; // Duration / Price jump not supported - What to do in this case?
+
+    uint256 yield = expectedYield(_params.policyDuration);
+    if (yield < policyPrice) {
+      // Scale payout to something more affordable...
+      payout = payout.wadMul(yield).wadDiv(policyPrice);
+      policyPrice = payout.wadMul(yield).wadDiv(policyPrice);
+    }
+
+    if (_borrowAsset.balanceOf(address(this)) < policyPrice) {
+      _borrowAmount(policyPrice - _borrowAsset.balanceOf(address(this)));
+    }
+
     _activePolicyId = _priceInsurance.newPolicy(
       triggerPrice,
       true,
@@ -269,6 +294,8 @@ abstract contract AaveHodlerVault is Initializable, OwnableUpgradeable, UUPSUpgr
   function _deinvest(uint256 amount) internal virtual returns (uint256);
 
   function totalInvested() public view virtual returns (uint256);
+
+  function investYieldRate() public view virtual returns (uint256);
 
   function _liqThreshold() internal view returns (uint256) {
     return

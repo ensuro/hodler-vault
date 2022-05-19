@@ -58,4 +58,9 @@ contract EnsuroLPAaveHodlerVault is AaveHodlerVault {
   function totalInvested() public view override returns (uint256) {
     return IEToken(address(_eToken)).balanceOf(address(this));
   }
+
+  function investYieldRate() public view override returns (uint256) {
+    //     return IEToken(address(_eToken)).tokenInterestRate();
+    return 0.12e27; // TODO tokenInterestRate
+  }
 }
