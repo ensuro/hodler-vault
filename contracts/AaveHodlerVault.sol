@@ -16,6 +16,7 @@ import {Policy} from "@ensuro/core/contracts/Policy.sol";
 import {WadRayMath} from "@ensuro/core/contracts/WadRayMath.sol";
 import {ERC20} from "@rari-capital/solmate/src/tokens/ERC20.sol";
 import {ERC4626} from "@rari-capital/solmate/src/mixins/ERC4626.sol";
+import {FixedPointMathLib} from "@rari-capital/solmate/src/utils/FixedPointMathLib.sol";
 import {IUniswapV2Router02} from "@uniswap/v2-periphery/contracts/interfaces/IUniswapV2Router02.sol";
 
 /**
@@ -29,6 +30,7 @@ abstract contract AaveHodlerVault is Initializable, OwnableUpgradeable, UUPSUpgr
   using SafeERC20 for IERC20Metadata;
   using WadRayMath for uint256;
   using PercentageMath for uint256;
+  using FixedPointMathLib for uint256;
 
   uint256 private constant PAYOUT_BUFFER = 2e16; // 2%
   uint256 private constant LIQUIDATION_THRESHOLD_MASK = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF0000FFFF; // prettier-ignore
@@ -117,13 +119,14 @@ abstract contract AaveHodlerVault is Initializable, OwnableUpgradeable, UUPSUpgr
   }
 
   function beforeWithdraw(uint256 assets, uint256 shares) internal override {
+    // TODO: forbit withdraw / deposit in the same tx, can be exploited
     uint256 assetInAave = IERC20Metadata(_aave.getReserveData(address(asset)).aTokenAddress)
       .balanceOf(address(this));
 
     // Withdraw operations must preserve or improve the health factor
     // Returns a fractor of stacked asset and swaps the remaining deinvesting the borrowAsset
-    uint256 toWithdrawFromAave = (assetInAave * shares) / totalSupply;
-    uint256 borrowAssetRepay = (_borrowAssetDebt() * shares) / totalSupply;
+    uint256 toWithdrawFromAave = assetInAave.mulDivDown(shares, totalSupply);
+    uint256 borrowAssetRepay = _borrowAssetDebt().mulDivDown(shares, totalSupply);
     uint256 toAcquireAsset = (assets - toWithdrawFromAave).wadMul(
       WadRayMath.wad() + _params.maxSlippage
     );
