@@ -12,6 +12,8 @@ describe("Test AaveHodlerVault contract - run at https://polygonscan.com/block/2
   let usrUSDC;
   let usrWMATIC;
   let _A;
+  let amWMATIC;
+  let variableDebtmUSDC;
 
   const ADDRESSES = {
     usdc: "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174",
@@ -19,12 +21,16 @@ describe("Test AaveHodlerVault contract - run at https://polygonscan.com/block/2
     weth: "0x7ceB23fD6bC0adD59E62ac25578270cFf1b9f619",
     etk: "0xCFfDcC8e99Aa22961704b9C7b67Ed08A66EA45Da",
     aave: "0xd05e3E715d945B59290df0ae8eF85c1BdB684744",  // AAVE Address Provider
+    amWMATIC: "0x8dF3aad3a84da6b69A4DA8aeC3eA40d9091B2Ac4",
+    aaveLendingPool: "0x8dFf5E27EA6b7AC08EbFdf9eB090F32ee9a30fcf",
+    variableDebtmUSDC: "0x248960A9d75EdFa3de94F7193eae3161Eb349a12",
     oracle: "0x0229f777b0fab107f9591a41d5f02e4e98db6f2d",  // AAVE PriceOracle
     sushi: "0x1b02dA8Cb0d097eB8D57A175b88c7D8b47997506",  // Sushiswap router
     assetMgr: "0x09d9Dd252659a497F3525F257e204E7192beF132",
     usrUSDC: "0x4d97dcd97ec945f40cf65f87097ace5ea0476045", // Random account with lot of USDC
     usrWMATIC: "0x55FF76BFFC3Cdd9D5FdbBC2ece4528ECcE45047e", // Random account with log of WMATIC
   };
+
   const _BN = ethers.BigNumber.from;
 
   beforeEach(async () => {
@@ -41,6 +47,9 @@ describe("Test AaveHodlerVault contract - run at https://polygonscan.com/block/2
     });
     USDC = await ethers.getContractAt("IERC20Metadata", ADDRESSES.usdc);
     WMATIC = await ethers.getContractAt("IERC20Metadata", ADDRESSES.wmatic);
+    amWMATIC = await ethers.getContractAt("IERC20Metadata", ADDRESSES.amWMATIC);
+    variableDebtmUSDC = await ethers.getContractAt("IERC20Metadata", ADDRESSES.variableDebtmUSDC);
+
     pool = await deployPool(hre, {currency: ADDRESSES.usdc, grantRoles: ["LEVEL1_ROLE", "LEVEL2_ROLE"]});
     pool._A = _A = amountFunction(6);
 
@@ -72,22 +81,20 @@ describe("Test AaveHodlerVault contract - run at https://polygonscan.com/block/2
     await pool.connect(usrUSDC).deposit(etk.address, _A(10000));
   });
 
-  it("Should deposit into AAVE and withdraw", async function() {
+  it("Should build an empty vault", async function() {
     const vault = await hre.upgrades.deployProxy(EnsuroLPAaveHodlerVault, [
-      [_W("1.02"), _W("1.10"), _W("1.2"), _W("1.3"), 24 * 3600],
+      [_W("1.02"), _W("1.10"), _W("1.2"), _W("1.3"), _W("0.01"), ADDRESSES.sushi, 24 * 3600],
       etk.address
     ], {
       kind: 'uups',
-      unsafeAllow: ["delegatecall"],
-      constructorArgs: [priceRM.address, ADDRESSES.aave]
+      unsafeAllow: ["delegatecall", "state-variable-immutable", "constructor"],
+      constructorArgs: ["WETH EToken", "eWETH", priceRM.address, ADDRESSES.aave]
     });
 
-    await WMATIC.connect(usrWMATIC).approve(vault.address, _W(100));
+    expect(await vault.totalAssets()).to.equal(0);
+    expect(await vault.totalSupply()).to.equal(0);
 
-    const startBalance = await WMATIC.balanceOf(usrWMATIC.address);
-    await vault.connect(usrWMATIC).depositCollateral(_W(100), false);
-
-    await hre.network.provider.request(
+  /*  await hre.network.provider.request(
       {method: "evm_increaseTime", params: [365 * 24 * 3600]}
     );
 
@@ -101,7 +108,39 @@ describe("Test AaveHodlerVault contract - run at https://polygonscan.com/block/2
     console.log(endBalance.sub(startBalance))
 
     // Around 2.51% interest
-    expect(endBalance.sub(startBalance)).to.closeTo(_W(2.51), _W(0.01));
+    expect(endBalance.sub(startBalance)).to.closeTo(_W(2.51), _W(0.01));*/
    });
 
+  it.only("Should deposit and withdraw asset without checkpoint", async function() {
+    const vault = await hre.upgrades.deployProxy(EnsuroLPAaveHodlerVault, [
+      [_W("1.02"), _W("1.10"), _W("1.2"), _W("1.3"), _W("0.01"), ADDRESSES.sushi, 24 * 3600],
+      etk.address
+    ], {
+      kind: 'uups',
+      unsafeAllow: ["delegatecall", "state-variable-immutable", "constructor"],
+      constructorArgs: ["WETH EToken", "eWETH", priceRM.address, ADDRESSES.aave]
+    });
+
+    await WMATIC.connect(usrWMATIC).approve(vault.address, _W(100));
+
+    const startBalance = await WMATIC.balanceOf(usrWMATIC.address);
+
+    await expect(() => vault.connect(usrWMATIC).deposit(_W(100), usrWMATIC.address)).to.changeTokenBalances(
+      WMATIC, [usrWMATIC, vault, amWMATIC], [_W(-100), _W(0), _W(100)]
+    );
+
+    expect(await vault.totalAssets()).to.equal(_W(100));
+    expect(await vault.totalSupply()).to.equal(_W(100));
+
+    expect(await amWMATIC.balanceOf(vault.address)).to.closeTo(_W(100), _W(0.001));
+    expect(await variableDebtmUSDC.balanceOf(vault.address)).to.equal(0);  // Doesn't borrow
+
+    let totalAssets = await vault.totalAssets();
+
+    await expect(() => vault.connect(usrWMATIC).withdraw(
+      totalAssets, usrWMATIC.address, usrWMATIC.address
+    )).to.changeTokenBalances(
+      WMATIC, [usrWMATIC, vault, amWMATIC], [totalAssets, 0, totalAssets.mul(_BN(-1))]
+    );
+  });
 });

@@ -148,29 +148,29 @@ abstract contract AaveHodlerVault is Initializable, OwnableUpgradeable, UUPSUpgr
     _deinvest(toAcquireAsset + borrowAssetRepay);
 
     // Swap
-    address[] memory path = new address[](2);
-    path[0] = address(asset);
-    path[1] = address(_borrowAsset);
-    _borrowAsset.approve(address(_params.swapRouter), toAcquireAsset); // TODO: infinite approval??
-    _params.swapRouter.swapTokensForExactTokens(
-      assets - toWithdrawFromAave,
-      toAcquireAsset,
-      path,
-      address(this),
-      block.timestamp
-    );
+    if (toAcquireAsset > 0) {
+      address[] memory path = new address[](2);
+      path[0] = address(asset);
+      path[1] = address(_borrowAsset);
+      _borrowAsset.approve(address(_params.swapRouter), toAcquireAsset); // TODO: infinite approval??
+      _params.swapRouter.swapTokensForExactTokens(
+        assets - toWithdrawFromAave,
+        toAcquireAsset,
+        path,
+        address(this),
+        block.timestamp
+      );
+    }
 
     require(
       _borrowAsset.balanceOf(address(this)) >= borrowAssetRepay,
       "Can't decrease health factor"
     );
 
-    _aave.repay(
-      address(_borrowAsset),
-      _borrowAsset.balanceOf(address(this)),
-      BORROW_RATE_MODE,
-      address(this)
-    );
+    borrowAssetRepay = _borrowAsset.balanceOf(address(this));
+    if (borrowAssetRepay > 0) {
+      _aave.repay(address(_borrowAsset), borrowAssetRepay, BORROW_RATE_MODE, address(this));
+    }
 
     _aave.withdraw(address(asset), toWithdrawFromAave, address(this));
   }
