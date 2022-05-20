@@ -24,7 +24,7 @@
     "prettier-plugin-solidity": "^1.0.0-beta.19",
     "solhint": "^3.3.7",
     "solhint-plugin-prettier": "0.0.5",
-    "solidity-coverage": "^0.7.20"
+    "solidity-coverage": "^0.7.21"
   },
   "dependencies": {
     "@aave/protocol-v2": "https://github.com/gnarvaja/protocol-v2.git",

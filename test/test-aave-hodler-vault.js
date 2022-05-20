@@ -93,10 +93,6 @@ describe("Test AaveHodlerVault contract - run at https://polygonscan.com/block/2
 
     grantRole(hre, priceRM, "PRICER_ROLE", owner.address);
 
-    const priceSlots = await priceRM.PRICE_SLOTS();
-    const cdf = _makeArray(priceSlots, _R(0.05));
-    await priceRM.connect(owner).setCDF(24, cdf);
-
     EnsuroLPAaveHodlerVault = await ethers.getContractFactory("EnsuroLPAaveHodlerVault", usrWMATIC);
 
     etk = await addEToken(pool, {});
@@ -171,9 +167,56 @@ describe("Test AaveHodlerVault contract - run at https://polygonscan.com/block/2
     expect(await WMATIC.balanceOf(usrWMATIC.address)).to.be.closeTo(startBalance, _W(0.001));
   });
 
-  it.only("Should deposit and withdraw asset invest checkpoint", async function() {
+  it("Should deposit and withdraw asset invest checkpoint policy reduced", async function() {
     const vault = await hre.upgrades.deployProxy(EnsuroLPAaveHodlerVault, [
       [_W("1.02"), _W("1.10"), _W("1.2"), _W("1.3"), _W("0.01"), ADDRESSES.sushi, 24 * 3600],
+      etk.address
+    ], {
+      kind: 'uups',
+      unsafeAllow: ["delegatecall", "state-variable-immutable", "constructor"],
+      constructorArgs: ["WMATIC EToken", "eWMATIC", priceRM.address, ADDRESSES.aave]
+    });
+
+    const wmaticPrice = await exchange.convert(ADDRESSES.wmatic, ADDRESSES.usdc, _W(1));
+    expect(wmaticPrice).to.equal(_A(0.913779));
+
+    await WMATIC.connect(usrWMATIC).approve(vault.address, _W(100));
+
+    await expect(() => vault.connect(usrWMATIC).deposit(_W(100), usrWMATIC.address)).to.changeTokenBalances(
+      WMATIC, [usrWMATIC, vault, amWMATIC], [_W(-100), _W(0), _W(100)]
+    );
+
+    expect(await vault.totalAssets()).to.equal(_W(100));
+    expect(await vault.totalSupply()).to.equal(_W(100));
+
+    expect(await amWMATIC.balanceOf(vault.address)).to.closeTo(_W(100), _W(0.001));
+    expect(await variableDebtmUSDC.balanceOf(vault.address)).to.equal(0);  // Doesn't borrow
+
+    let expectedBorrow = _A(0.913779 * 100 * 0.7 / 1.30);
+    let tx = await vault.checkpoint();
+    let receipt = await tx.wait();
+    expect(await variableDebtmUSDC.balanceOf(vault.address)).to.be.closeTo(expectedBorrow, _A(0.01));
+
+    // Probability 5% --> natural premium is bigger than expectedYield --> premium == expectedYield
+    const priceSlots = await priceRM.PRICE_SLOTS();
+    const cdf = _makeArray(priceSlots, _R(0.05));
+    await priceRM.connect(owner).setCDF(24, cdf);
+
+    const expectedYield = await vault.expectedYield(3600 * 24);
+    expect(expectedYield).to.equal(10919);  // ~(0.913779 * 100 * 0.7 / 1.30) * 0.07 * (1/365)
+
+    tx = await vault.insure(false);
+    receipt = await tx.wait();
+    const PolicyPool = await ethers.getContractFactory("PolicyPool");
+    const newPolicyEvt = getTransactionEvent(PolicyPool.interface, receipt, "NewPolicy");
+    expect(newPolicyEvt.args.policy.premium).to.be.equal(expectedYield);
+    expect(newPolicyEvt.args.policy.payout).to.be.equal(217248);
+    expect(newPolicyEvt.args.policy.purePremium).to.be.equal(newPolicyEvt.args.policy.payout.div(20)); // 5%
+  });
+
+  it("Should deposit and withdraw asset invest checkpoint policy standard", async function() {
+    const vault = await hre.upgrades.deployProxy(EnsuroLPAaveHodlerVault, [
+      [_W("1.02"), _W("1.05"), _W("1.2"), _W("1.3"), _W("0.01"), ADDRESSES.sushi, 24 * 3600],
       etk.address
     ], {
       kind: 'uups',
@@ -203,10 +246,24 @@ describe("Test AaveHodlerVault contract - run at https://polygonscan.com/block/2
     let receipt = await tx.wait();
     expect(await variableDebtmUSDC.balanceOf(vault.address)).to.be.closeTo(expectedBorrow, _A(0.01));
 
+
+    // Probability 0.05% --> cheap policy
+    const priceSlots = await priceRM.PRICE_SLOTS();
+    const cdf = _makeArray(priceSlots, _R(0.0005));
+    await priceRM.connect(owner).setCDF(24, cdf);
+
+    const expectedPayout = _A(0.913779 * (1.02/1.3) * 100 * (1.05/1.02 - 1));
+
     tx = await vault.insure(false);
     receipt = await tx.wait();
     const PolicyPool = await ethers.getContractFactory("PolicyPool");
     const newPolicyEvt = getTransactionEvent(PolicyPool.interface, receipt, "NewPolicy");
-    console.log(newPolicyEvt);
+    expect(newPolicyEvt.args.policy.premium).to.be.equal(1631);
+    expect(newPolicyEvt.args.policy.payout).to.be.closeTo(expectedPayout, _A(0.001));
+    expect(newPolicyEvt.args.policy.purePremium).to.be.closeTo(
+      _A(0.913779 * (1.02/1.3) * 100 * (1.05/1.02 - 1) * 0.0005), _A(0.001)
+    );
+
+    expect((await vault.totalAssets()).lt(totalAssets)).to.be.true;
   });
 });
