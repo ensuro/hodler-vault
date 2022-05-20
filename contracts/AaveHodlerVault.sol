@@ -5,6 +5,7 @@ import {OwnableUpgradeable} from "@openzeppelin/contracts-upgradeable/access/Own
 import {Initializable} from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
+import {IERC721Receiver} from "@openzeppelin/contracts/token/ERC721/IERC721Receiver.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {ILendingPoolAddressesProvider} from "@aave/protocol-v2/contracts/interfaces/ILendingPoolAddressesProvider.sol";
@@ -13,6 +14,7 @@ import {IPriceOracle} from "@aave/protocol-v2/contracts/interfaces/IPriceOracle.
 import {ILendingRateOracle} from "@aave/protocol-v2/contracts/interfaces/ILendingRateOracle.sol";
 import {PercentageMath} from "@aave/protocol-v2/contracts/protocol/libraries/math/PercentageMath.sol";
 import {IPriceRiskModule} from "@ensuro/core/contracts/extras/IPriceRiskModule.sol";
+import {IPolicyPoolComponent} from "@ensuro/core/interfaces/IPolicyPoolComponent.sol";
 import {Policy} from "@ensuro/core/contracts/Policy.sol";
 import {WadRayMath} from "@ensuro/core/contracts/WadRayMath.sol";
 import {ERC20} from "@rari-capital/solmate/src/tokens/ERC20.sol";
@@ -27,7 +29,13 @@ import {IUniswapV2Router02} from "@uniswap/v2-periphery/contracts/interfaces/IUn
  * @custom:security-contact security@ensuro.co
  * @author Ensuro
  */
-abstract contract AaveHodlerVault is Initializable, OwnableUpgradeable, UUPSUpgradeable, ERC4626 {
+abstract contract AaveHodlerVault is
+  Initializable,
+  OwnableUpgradeable,
+  UUPSUpgradeable,
+  ERC4626,
+  IERC721Receiver
+{
   using SafeERC20 for IERC20Metadata;
   using WadRayMath for uint256;
   using PercentageMath for uint256;
@@ -96,12 +104,20 @@ abstract contract AaveHodlerVault is Initializable, OwnableUpgradeable, UUPSUpgr
     _params = params_;
     asset.approve(address(_aave), type(uint256).max);
     _borrowAsset.approve(address(_aave), type(uint256).max);
+    _borrowAsset.approve(
+      address(IPolicyPoolComponent(address(_priceInsurance)).policyPool()),
+      type(uint256).max
+    );
     _validateParameters();
   }
 
+  function _assetBalance() internal view returns (uint256) {
+    return
+      IERC20Metadata(_aave.getReserveData(address(asset)).aTokenAddress).balanceOf(address(this));
+  }
+
   function totalAssets() public view override returns (uint256) {
-    uint256 assetInAave = IERC20Metadata(_aave.getReserveData(address(asset)).aTokenAddress)
-      .balanceOf(address(this));
+    uint256 assetInAave = _assetBalance();
     uint256 borrowAssetDebt = _borrowAssetDebt();
     uint256 borrowAssetInvested = totalInvested();
     if (borrowAssetInvested >= borrowAssetDebt) {
@@ -190,6 +206,16 @@ abstract contract AaveHodlerVault is Initializable, OwnableUpgradeable, UUPSUpgr
   // solhint-disable-next-line no-empty-blocks
   function _authorizeUpgrade(address) internal override onlyOwner {}
 
+  // solhint-disable-next-line no-empty-blocks
+  function onERC721Received(
+    address,
+    address,
+    uint256,
+    bytes calldata
+  ) external pure override returns (bytes4) {
+    return IERC721Receiver.onERC721Received.selector;
+  }
+
   function _getHealthFactor() internal view returns (uint256) {
     (, , , , , uint256 currentHF) = _aave.getUserAccountData(address(this));
     return currentHF;
@@ -203,13 +229,9 @@ abstract contract AaveHodlerVault is Initializable, OwnableUpgradeable, UUPSUpgr
     if (hf > _params.investHF) {
       // Borrow stable, insure against liquidation and invest
       _borrow(_params.investHF);
-      _insure();
       _invest();
-    } else if (hf > _params.deinvestHF) {
-      _insure();
     } else if (hf <= _params.deinvestHF) {
       _repay(_params.investHF);
-      _insure();
     }
   }
 
@@ -243,24 +265,30 @@ abstract contract AaveHodlerVault is Initializable, OwnableUpgradeable, UUPSUpgr
     return ILendingRateOracle(_aave.getAddressesProvider().getLendingRateOracle());
   }
 
-  function _insure() internal {
-    if (_activePolicyExpiration > (block.timestamp + _params.policyDuration / 1000)) {
-      // Active policy not yet expired - _params.policyDuration is to allow "some" overlap (<90 secs in 1 day)
-      return;
-    }
+  function _hasActivePolicy() internal view returns (bool) {
+    return _activePolicyExpiration > (block.timestamp + _params.policyDuration / 1000);
+  }
+
+  function insure(bool forced) external {
+    require(!forced || owner() == _msgSender(), "Only the owner can force");
+    // Active policy not yet expired - _params.policyDuration is to allow some overlap (<90 secs in 1 day)
+    if (_hasActivePolicy()) return;
     uint256 currentHF = _getHealthFactor();
     if (currentHF <= _params.safeHF) {
       // I can't insure because it's already in the target health - _deinvest recommended at this point
       return;
     }
-    uint256 triggerPrice = _collPriceInBorrowAsset().wadMul(currentHF.wadDiv(_params.triggerHF));
+    uint256 triggerPrice = _collPriceInBorrowAsset().wadMul(_params.triggerHF.wadDiv(currentHF));
     // This triggerPrice doesn't take into account the interest rate of the borrowAsset neither the deposit interest
     // rate of the collateral. Can be improved in the future, but with a triggerHF at 1.01 we shouldn't be at
     // liquidation risk
 
-    uint256 payout = triggerPrice.wadMul(asset.balanceOf(address(this))).wadMul(
+    uint256 payout = _assetBalance().wadMul(
       _params.safeHF.wadDiv(_params.triggerHF) - WadRayMath.wad()
-    );
+    ) / 10**(asset.decimals() - _borrowAsset.decimals()); // TODO: what if asset.decimals() < _borrowAsset.decimals()?
+    payout =
+      (payout * triggerPrice + 10**_borrowAsset.decimals() / 2) /
+      10**_borrowAsset.decimals();
     (uint256 policyPrice, ) = _priceInsurance.pricePolicy(
       triggerPrice,
       true,
@@ -269,11 +297,13 @@ abstract contract AaveHodlerVault is Initializable, OwnableUpgradeable, UUPSUpgr
     );
     if (policyPrice == 0) return; // Duration / Price jump not supported - What to do in this case?
 
-    uint256 yield = expectedYield(_params.policyDuration);
-    if (yield < policyPrice) {
-      // Scale payout to something more affordable...
-      payout = payout.wadMul(yield).wadDiv(policyPrice);
-      policyPrice = payout.wadMul(yield).wadDiv(policyPrice);
+    if (!forced) {
+      uint256 yield = expectedYield(_params.policyDuration);
+      if (yield < policyPrice) {
+        // Scale payout to something more affordable...
+        payout = payout.mulDivDown(yield, policyPrice);
+        policyPrice = yield;
+      }
     }
 
     if (_borrowAsset.balanceOf(address(this)) < policyPrice) {
@@ -293,6 +323,10 @@ abstract contract AaveHodlerVault is Initializable, OwnableUpgradeable, UUPSUpgr
 
   function _deinvest(uint256 amount) internal virtual returns (uint256);
 
+  function activePolicyId() external view returns (uint256) {
+    return _activePolicyId;
+  }
+
   function totalInvested() public view virtual returns (uint256);
 
   function investYieldRate() public view virtual returns (uint256);
@@ -311,7 +345,11 @@ abstract contract AaveHodlerVault is Initializable, OwnableUpgradeable, UUPSUpgr
     IPriceOracle oracle = IPriceOracle(_aave.getAddressesProvider().getPriceOracle());
     uint256 collateralInEth = (IERC20Metadata(_aave.getReserveData(address(asset)).aTokenAddress)
       .balanceOf(address(this)) * oracle.getAssetPrice(address(asset))) / 10**asset.decimals();
-    targetDebt = collateralInEth.percentMul(_liqThreshold()).wadDiv(targetHF);
+    targetDebt =
+      collateralInEth.percentMul(_liqThreshold()).wadDiv(targetHF).wadDiv(
+        oracle.getAssetPrice(address(_borrowAsset))
+      ) /
+      10**(18 - _borrowAsset.decimals());
     return (_borrowAssetDebt(), targetDebt);
   }
 
