@@ -17,6 +17,8 @@ describe("Test AaveHodlerVault contract - run at https://polygonscan.com/block/2
   let variableDebtmUSDC;
   let exchange;
   let owner;
+  let lp;
+  let tokenInterestRate;
 
   const ADDRESSES = {
     usdc: "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174",
@@ -96,8 +98,25 @@ describe("Test AaveHodlerVault contract - run at https://polygonscan.com/block/2
     EnsuroLPAaveHodlerVault = await ethers.getContractFactory("EnsuroLPAaveHodlerVault", usrWMATIC);
 
     etk = await addEToken(pool, {});
-    await USDC.connect(usrUSDC).approve(pool.address, _A(10000));
-    await pool.connect(usrUSDC).deposit(etk.address, _A(10000));
+    await USDC.connect(usrUSDC).transfer(lp.address, _A(11500));  // fill my lp account
+    await USDC.connect(lp).approve(pool.address, _A(11500));
+    await pool.connect(lp).deposit(etk.address, _A(10000));
+
+    let TrustfulRiskModule = await ethers.getContractFactory("TrustfulRiskModule");
+    tfRM = await addRiskModule(
+      pool, TrustfulRiskModule,
+      {scrInterestRate: 0.1333333, maxScrPerPolicy: 10000.0}
+    );
+    grantRole(hre, tfRM, "PRICER_ROLE", owner.address);
+
+    const start = (await owner.provider.getBlock("latest")).timestamp;
+
+    // But a new Policy to lock 9000 -> tokenInterestRate = 0.133333 * 0.9 = 12%
+    await tfRM.connect(owner).newPolicy(
+      _A(9900), _A(1500), _R(0.09090909), start + 3600 * 24 * 30, lp.address, 1234
+    );
+
+    tokenInterestRate = await etk.tokenInterestRate();
   });
 
   it("Should build an empty vault", async function() {
@@ -203,15 +222,17 @@ describe("Test AaveHodlerVault contract - run at https://polygonscan.com/block/2
     await priceRM.connect(owner).setCDF(24, cdf);
 
     const expectedYield = await vault.expectedYield(3600 * 24);
-    expect(expectedYield).to.equal(10919);  // ~(0.913779 * 100 * 0.7 / 1.30) * 0.07 * (1/365)
+    expect(expectedYield).to.equal(10840);  // ~(0.913779 * 100 * 0.7 / 1.30) * 0.07 * (1/365)
 
     tx = await vault.insure(false);
     receipt = await tx.wait();
     const PolicyPool = await ethers.getContractFactory("PolicyPool");
     const newPolicyEvt = getTransactionEvent(PolicyPool.interface, receipt, "NewPolicy");
     expect(newPolicyEvt.args.policy.premium).to.be.equal(expectedYield);
-    expect(newPolicyEvt.args.policy.payout).to.be.equal(217248);
-    expect(newPolicyEvt.args.policy.purePremium).to.be.equal(newPolicyEvt.args.policy.payout.div(20)); // 5%
+    expect(newPolicyEvt.args.policy.payout).to.be.equal(215676);
+    expect(newPolicyEvt.args.policy.purePremium).to.be.closeTo(
+      newPolicyEvt.args.policy.payout.div(20), _A(0.001)
+    ); // 5%
   });
 
   it("Should deposit and withdraw asset invest checkpoint policy standard", async function() {

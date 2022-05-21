@@ -15,7 +15,7 @@ import {ILendingRateOracle} from "@aave/protocol-v2/contracts/interfaces/ILendin
 import {PercentageMath} from "@aave/protocol-v2/contracts/protocol/libraries/math/PercentageMath.sol";
 import {IPriceRiskModule} from "@ensuro/core/contracts/extras/IPriceRiskModule.sol";
 import {IPolicyPoolComponent} from "@ensuro/core/interfaces/IPolicyPoolComponent.sol";
-import {Policy} from "@ensuro/core/contracts/Policy.sol";
+import {IPolicyHolder} from "@ensuro/core/interfaces/IPolicyHolder.sol";
 import {WadRayMath} from "@ensuro/core/contracts/WadRayMath.sol";
 import {ERC20} from "@rari-capital/solmate/src/tokens/ERC20.sol";
 import {ERC4626} from "@rari-capital/solmate/src/mixins/ERC4626.sol";
@@ -34,7 +34,7 @@ abstract contract AaveHodlerVault is
   OwnableUpgradeable,
   UUPSUpgradeable,
   ERC4626,
-  IERC721Receiver
+  IPolicyHolder
 {
   using SafeERC20 for IERC20Metadata;
   using WadRayMath for uint256;
@@ -206,14 +206,32 @@ abstract contract AaveHodlerVault is
   // solhint-disable-next-line no-empty-blocks
   function _authorizeUpgrade(address) internal override onlyOwner {}
 
-  // solhint-disable-next-line no-empty-blocks
   function onERC721Received(
     address,
     address,
     uint256,
     bytes calldata
-  ) external pure override returns (bytes4) {
+  ) external view override returns (bytes4) {
     return IERC721Receiver.onERC721Received.selector;
+  }
+
+  function onPayoutReceived(
+    address operator,
+    address from,
+    uint256 policyId,
+    uint256 amount
+  ) external pure override returns (bytes4) {
+    // TODO buy the dip and renew policy
+    return IPolicyHolder.onPayoutReceived.selector;
+  }
+
+  function onPolicyExpired(
+    address operator,
+    address from,
+    uint256 policyId
+  ) external pure override returns (bytes4) {
+    // TODO renew policy
+    return IPolicyHolder.onPolicyExpired.selector;
   }
 
   function _getHealthFactor() internal view returns (uint256) {

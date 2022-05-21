@@ -60,6 +60,7 @@ module.exports = {
       '@ensuro/core/contracts/EToken.sol',
       '@ensuro/core/contracts/Exchange.sol',
       '@ensuro/core/contracts/extras/PriceRiskModule.sol',
+      '@ensuro/core/contracts/TrustfulRiskModule.sol',
     ],
   },
   defaultNetwork: "hardhat",
