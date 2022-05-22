@@ -168,9 +168,9 @@ abstract contract AaveHodlerVault is
     // Returns a fractor of stacked asset and swaps the remaining deinvesting the borrowAsset
     uint256 toWithdrawFromAave = assetInAave.mulDivDown(shares, totalSupply);
     uint256 borrowAssetRepay = _borrowAssetDebt().mulDivDown(shares, totalSupply);
-    uint256 toAcquireAsset = (assets - toWithdrawFromAave).wadMul(
+    uint256 toAcquireAsset = _convertAssetToBorrow((assets - toWithdrawFromAave).wadMul(
       WadRayMath.wad() + _maxSlippage()
-    );
+    ));
     _deinvest(toAcquireAsset + borrowAssetRepay);
 
     // Swap
@@ -178,9 +178,9 @@ abstract contract AaveHodlerVault is
       address swapRouter = _params.exchange.getSwapRouter();
       _borrowAsset.approve(swapRouter, toAcquireAsset); // TODO: infinite approval??
       bytes memory swapCall = _params.exchange.buy(
-        address(asset),
         address(_borrowAsset),
-        toAcquireAsset,
+        address(asset),
+        assets - toWithdrawFromAave,
         address(this),
         block.timestamp
       );
@@ -220,13 +220,13 @@ abstract contract AaveHodlerVault is
     address,
     uint256,
     bytes calldata
-  ) external view override returns (bytes4) {
+  ) external pure override returns (bytes4) {
     return IERC721Receiver.onERC721Received.selector;
   }
 
   function onPayoutReceived(
-    address operator,
-    address from,
+    address,
+    address,
     uint256 policyId,
     uint256 amount
   ) external pure override returns (bytes4) {
@@ -235,9 +235,9 @@ abstract contract AaveHodlerVault is
   }
 
   function onPolicyExpired(
-    address operator,
-    address from,
-    uint256 policyId
+    address,
+    address,
+    uint256
   ) external override returns (bytes4) {
     // TODO: do I need to validate the call comes from the pool?
     // Since insure it's an open end-point I don't think so

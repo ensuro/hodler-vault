@@ -79,7 +79,7 @@ describe("Test AaveHodlerVault contract - run at https://polygonscan.com/block/2
     exchange = await hre.upgrades.deployProxy(Exchange, [
       ADDRESSES.oracle,
       ADDRESSES.sushi,
-      _E("0.02")
+      _E("0.005")  // 0.5%
       ],
       {constructorArgs: [pool.address], kind: 'uups'}
     );
@@ -234,6 +234,15 @@ describe("Test AaveHodlerVault contract - run at https://polygonscan.com/block/2
     expect(newPolicyEvt.args.policy.purePremium).to.be.closeTo(
       newPolicyEvt.args.policy.payout.div(20), _A(0.001)
     ); // 5%
+
+    // After 30 days - difference between borrow and yield should accrue some wmatic
+    await network.provider.send("evm_increaseTime", [3600 * 24 * 30])
+    const shares = await vault.balanceOf(usrWMATIC.address);
+    const totalAssets = await vault.totalAssets();
+
+    await vault.connect(usrWMATIC).redeem(shares, lp.address, usrWMATIC.address);
+    const actualAssets = await WMATIC.balanceOf(lp.address);
+    expect(totalAssets.lte(actualAssets)).to.be.true;
   });
 
   it("Should deposit and withdraw asset invest checkpoint policy standard", async function() {
