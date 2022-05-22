@@ -168,9 +168,9 @@ abstract contract AaveHodlerVault is
     // Returns a fractor of stacked asset and swaps the remaining deinvesting the borrowAsset
     uint256 toWithdrawFromAave = assetInAave.mulDivDown(shares, totalSupply);
     uint256 borrowAssetRepay = _borrowAssetDebt().mulDivDown(shares, totalSupply);
-    uint256 toAcquireAsset = _convertAssetToBorrow((assets - toWithdrawFromAave).wadMul(
-      WadRayMath.wad() + _maxSlippage()
-    ));
+    uint256 toAcquireAsset = _convertAssetToBorrow(
+      (assets - toWithdrawFromAave).wadMul(WadRayMath.wad() + _maxSlippage())
+    );
     _deinvest(toAcquireAsset + borrowAssetRepay);
 
     // Swap
@@ -228,10 +228,42 @@ abstract contract AaveHodlerVault is
     address,
     address,
     uint256 policyId,
-    uint256 amount
-  ) external pure override returns (bytes4) {
-    // TODO buy the dip and renew policy
+    uint256
+  ) external override returns (bytes4) {
+    require(
+      msg.sender == address(IPolicyPoolComponent(address(_priceInsurance)).policyPool()) &&
+        policyId == _activePolicyId,
+      "Only the PolicyPool can call onPayoutReceived"
+    );
+    if (_params.payoutStrategy == OnPayoutStrategy.buyTheDip) {
+      _buyTheDip();
+    } else {
+      _aave.repay(
+        address(_borrowAsset),
+        _borrowAsset.balanceOf(address(this)),
+        BORROW_RATE_MODE,
+        address(this)
+      );
+    }
+    _activePolicyId = 0;
+    _activePolicyExpiration = 0;
+    insure(false);
     return IPolicyHolder.onPayoutReceived.selector;
+  }
+
+  function _buyTheDip() internal {
+    uint256 amount = _borrowAsset.balanceOf(address(this));
+    address swapRouter = _params.exchange.getSwapRouter();
+    _borrowAsset.approve(swapRouter, amount); // TODO: infinite approval??
+    bytes memory swapCall = _params.exchange.sell(
+      address(_borrowAsset),
+      address(asset),
+      amount,
+      address(this),
+      block.timestamp
+    );
+    swapRouter.functionCall(swapCall, "Swap operation failed");
+    _aave.deposit(address(asset), asset.balanceOf(address(this)), address(this), 0);
   }
 
   function onPolicyExpired(
@@ -307,16 +339,17 @@ abstract contract AaveHodlerVault is
       // I can't insure because it's already in the target health - _deinvest recommended at this point
       return;
     }
-    uint256 triggerPrice = _params.exchange.getExchangeRate(address(asset), address(_borrowAsset)).wadMul(
-      _params.triggerHF.wadDiv(currentHF)
-    );
+    uint256 triggerPrice = _params
+      .exchange
+      .getExchangeRate(address(asset), address(_borrowAsset))
+      .wadMul(_params.triggerHF.wadDiv(currentHF));
     // This triggerPrice doesn't take into account the interest rate of the borrowAsset neither the deposit interest
     // rate of the collateral. Can be improved in the future, but with a triggerHF at 1.01 we shouldn't be at
     // liquidation risk
 
-    uint256 payout = _assetBalance().wadMul(
-      _params.safeHF.wadDiv(_params.triggerHF) - WadRayMath.wad()
-    ).wadMul(triggerPrice);
+    uint256 payout = _assetBalance()
+      .wadMul(_params.safeHF.wadDiv(_params.triggerHF) - WadRayMath.wad())
+      .wadMul(triggerPrice);
     (uint256 policyPrice, ) = _priceInsurance.pricePolicy(
       triggerPrice,
       true,

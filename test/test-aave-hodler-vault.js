@@ -1,5 +1,5 @@
 const { expect } = require("chai");
-const { impersonate, deployPool, _E, _W, _R, addRiskModule,
+const { impersonate, deployPool, _E, _W, _R, addRiskModule, wadMul,
         addEToken, amountFunction, getTransactionEvent, grantRole } = require("./test-utils");
 
 
@@ -19,6 +19,7 @@ describe("Test AaveHodlerVault contract - run at https://polygonscan.com/block/2
   let owner;
   let lp;
   let tokenInterestRate;
+  let priceOracle;
 
   const ADDRESSES = {
     usdc: "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174",
@@ -75,13 +76,20 @@ describe("Test AaveHodlerVault contract - run at https://polygonscan.com/block/2
     usrUSDC = await impersonate(ADDRESSES.usrUSDC, _E("10"));
     usrWMATIC = await impersonate(ADDRESSES.usrWMATIC, _E("10"));
 
-    const Exchange = await ethers.getContractFactory("Exchange");
+    const PriceOracle = await ethers.getContractFactory("PriceOracle");
+    priceOracle = await PriceOracle.deploy(ADDRESSES.oracle);
+
+    const Exchange = await ethers.getContractFactory("ExchangeAnyMaxSlippage");
     exchange = await hre.upgrades.deployProxy(Exchange, [
-      ADDRESSES.oracle,
+      priceOracle.address,
       ADDRESSES.sushi,
       _E("0.005")  // 0.5%
       ],
-      {constructorArgs: [pool.address], kind: 'uups'}
+      {
+        constructorArgs: [pool.address],
+        kind: 'uups',
+        unsafeAllow: ["delegatecall", "state-variable-immutable", "constructor"],
+      }
     );
     await exchange.deployed();
 
@@ -132,23 +140,7 @@ describe("Test AaveHodlerVault contract - run at https://polygonscan.com/block/2
 
     expect(await vault.totalAssets()).to.equal(0);
     expect(await vault.totalSupply()).to.equal(0);
-
-  /*  await hre.network.provider.request(
-      {method: "evm_increaseTime", params: [365 * 24 * 3600]}
-    );
-
-    await hre.network.provider.request(
-      {method: "evm_mine", params: []}
-    );
-
-    await vault.connect(usrWMATIC).withdrawAll();
-
-    const endBalance = await WMATIC.balanceOf(usrWMATIC.address);
-    console.log(endBalance.sub(startBalance))
-
-    // Around 2.51% interest
-    expect(endBalance.sub(startBalance)).to.closeTo(_W(2.51), _W(0.01));*/
-   });
+  });
 
   it("Should deposit and withdraw asset without checkpoint", async function() {
     const vault = await hre.upgrades.deployProxy(EnsuroLPAaveHodlerVault, [
@@ -297,14 +289,16 @@ describe("Test AaveHodlerVault contract - run at https://polygonscan.com/block/2
       _A(0.913779 * (1.02/1.3) * 100 * (1.05/1.02 - 1) * 0.0005), _A(0.001)
     );
 
+    let newPricePolicyEvt = getTransactionEvent(PriceRiskModule.interface, receipt, "NewPricePolicy");
+
     expect((await vault.totalAssets()).lt(totalAssets)).to.be.true;
 
-    // After 24 hours, new policy expires
+    // After 24 hours, the policy expires and it's renewed
     await network.provider.send("evm_increaseTime", [3600 * 24])
     await network.provider.send("evm_mine") // this one will have 02:00 PM as its timestamp
     tx = await pool.expirePolicy(newPolicyEvt.args.policy);
     receipt = await tx.wait();
-    const renewPolicyEvt = getTransactionEvent(PolicyPool.interface, receipt, "NewPolicy");
+    let renewPolicyEvt = getTransactionEvent(PolicyPool.interface, receipt, "NewPolicy");
     expect(newPolicyEvt.args.policy.id).not.to.be.equal(renewPolicyEvt.args.policy.id);
     expect(renewPolicyEvt.args.policy.id).to.be.equal(await vault.activePolicyId());
     expect(renewPolicyEvt.args.policy.premium).to.be.closeTo(_A(0.001631), _A(0.00001));
@@ -312,5 +306,25 @@ describe("Test AaveHodlerVault contract - run at https://polygonscan.com/block/2
     expect(renewPolicyEvt.args.policy.purePremium).to.be.closeTo(
       _A(0.913779 * (1.02/1.3) * 100 * (1.05/1.02 - 1) * 0.0005), _A(0.001)
     );
+    newPricePolicyEvt = getTransactionEvent(PriceRiskModule.interface, receipt, "NewPricePolicy");
+
+    // After a few hours, price goes down 30%
+    await network.provider.send("evm_increaseTime", [3600 * 2]);
+    const wmaticInEth = await priceOracle.getAssetPrice(ADDRESSES.wmatic);
+    priceOracle.setAssetPrice(ADDRESSES.wmatic, wadMul(wmaticInEth, _W("0.7")));
+
+    // Set maxSlippage to 50% because we is not the real price
+    await exchange.connect(owner).setMaxSlippageUncapped(_W(0.5));
+
+    let amWMATICBefore = await amWMATIC.balanceOf(vault.address);
+
+    tx = await priceRM.triggerPolicy(renewPolicyEvt.args.policy.id);
+    receipt = await tx.wait();
+
+    // Some WMATIC is acquired
+    expect((await amWMATIC.balanceOf(vault.address)).gt(amWMATICBefore)).to.be.true;
+    // New Policy
+    renewPolicyEvt = getTransactionEvent(PolicyPool.interface, receipt, "NewPolicy");
+    expect(renewPolicyEvt.args.policy.id).to.be.equal(await vault.activePolicyId());
   });
 });

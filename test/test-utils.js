@@ -232,6 +232,10 @@ const _R = function(value) {
 
 exports._R = _R;
 
+exports.wadMul = function (a, b) {
+  return a.mul(b).add(WAD.div(2)).div(WAD);
+}
+
 exports.amountFunction = function (decimals) {
   // Decimals must be at least 6
   return function (value) {
