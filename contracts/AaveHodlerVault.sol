@@ -4,17 +4,18 @@ pragma solidity ^0.8.0;
 import {OwnableUpgradeable} from "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
 import {Initializable} from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import {AddressUpgradeable} from "@openzeppelin/contracts-upgradeable/utils/AddressUpgradeable.sol";
 import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import {IERC721Receiver} from "@openzeppelin/contracts/token/ERC721/IERC721Receiver.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {ILendingPoolAddressesProvider} from "@aave/protocol-v2/contracts/interfaces/ILendingPoolAddressesProvider.sol";
 import {ILendingPool} from "@aave/protocol-v2/contracts/interfaces/ILendingPool.sol";
-import {IPriceOracle} from "@aave/protocol-v2/contracts/interfaces/IPriceOracle.sol";
 import {ILendingRateOracle} from "@aave/protocol-v2/contracts/interfaces/ILendingRateOracle.sol";
 import {PercentageMath} from "@aave/protocol-v2/contracts/protocol/libraries/math/PercentageMath.sol";
 import {IPriceRiskModule} from "@ensuro/core/contracts/extras/IPriceRiskModule.sol";
 import {IPolicyPoolComponent} from "@ensuro/core/interfaces/IPolicyPoolComponent.sol";
+import {IExchange, IPriceOracle} from "@ensuro/core/interfaces/IExchange.sol";
 import {IPolicyHolder} from "@ensuro/core/interfaces/IPolicyHolder.sol";
 import {WadRayMath} from "@ensuro/core/contracts/WadRayMath.sol";
 import {ERC20} from "@rari-capital/solmate/src/tokens/ERC20.sol";
@@ -40,6 +41,7 @@ abstract contract AaveHodlerVault is
   using WadRayMath for uint256;
   using PercentageMath for uint256;
   using FixedPointMathLib for uint256;
+  using AddressUpgradeable for address;
 
   uint256 private constant SECONDS_PER_YEAR = 3600 * 24 * 365;
 
@@ -65,8 +67,7 @@ abstract contract AaveHodlerVault is
     uint256 safeHF;
     uint256 deinvestHF;
     uint256 investHF;
-    uint256 maxSlippage;
-    IUniswapV2Router02 swapRouter;
+    IExchange exchange;
     uint40 policyDuration;
     OnPayoutStrategy payoutStrategy;
   }
@@ -122,6 +123,10 @@ abstract contract AaveHodlerVault is
       IERC20Metadata(_aave.getReserveData(address(asset)).aTokenAddress).balanceOf(address(this));
   }
 
+  function _maxSlippage() internal view returns (uint256) {
+    return _params.exchange.maxSlippage();
+  }
+
   function totalAssets() public view override returns (uint256) {
     uint256 assetInAave = _assetBalance();
     uint256 borrowAssetDebt = _borrowAssetDebt();
@@ -130,11 +135,11 @@ abstract contract AaveHodlerVault is
       return
         assetInAave +
         _convertBorrowToAsset(borrowAssetInvested - borrowAssetDebt).wadMul(
-          WadRayMath.wad() - _params.maxSlippage
+          WadRayMath.wad() - _maxSlippage()
         );
     } else {
       uint256 borrowDebtInAsset = _convertBorrowToAsset(borrowAssetDebt - borrowAssetInvested)
-        .wadMul(WadRayMath.wad() + _params.maxSlippage);
+        .wadMul(WadRayMath.wad() + _maxSlippage());
       if (borrowAssetDebt > assetInAave) {
         return 0; // MUST NOT REVERT, negative not supported
       } else {
@@ -157,31 +162,29 @@ abstract contract AaveHodlerVault is
 
   function beforeWithdraw(uint256 assets, uint256 shares) internal override {
     // TODO: forbit withdraw / deposit in the same tx, can be exploited
-    uint256 assetInAave = IERC20Metadata(_aave.getReserveData(address(asset)).aTokenAddress)
-      .balanceOf(address(this));
+    uint256 assetInAave = _assetBalance();
 
     // Withdraw operations must preserve or improve the health factor
     // Returns a fractor of stacked asset and swaps the remaining deinvesting the borrowAsset
     uint256 toWithdrawFromAave = assetInAave.mulDivDown(shares, totalSupply);
     uint256 borrowAssetRepay = _borrowAssetDebt().mulDivDown(shares, totalSupply);
     uint256 toAcquireAsset = (assets - toWithdrawFromAave).wadMul(
-      WadRayMath.wad() + _params.maxSlippage
+      WadRayMath.wad() + _maxSlippage()
     );
     _deinvest(toAcquireAsset + borrowAssetRepay);
 
     // Swap
     if (toAcquireAsset > 0) {
-      address[] memory path = new address[](2);
-      path[0] = address(asset);
-      path[1] = address(_borrowAsset);
-      _borrowAsset.approve(address(_params.swapRouter), toAcquireAsset); // TODO: infinite approval??
-      _params.swapRouter.swapTokensForExactTokens(
-        assets - toWithdrawFromAave,
+      address swapRouter = _params.exchange.getSwapRouter();
+      _borrowAsset.approve(swapRouter, toAcquireAsset); // TODO: infinite approval??
+      bytes memory swapCall = _params.exchange.buy(
+        address(asset),
+        address(_borrowAsset),
         toAcquireAsset,
-        path,
         address(this),
         block.timestamp
       );
+      swapRouter.functionCall(swapCall, "Swap operation failed");
     }
 
     require(
@@ -304,17 +307,16 @@ abstract contract AaveHodlerVault is
       // I can't insure because it's already in the target health - _deinvest recommended at this point
       return;
     }
-    uint256 triggerPrice = _collPriceInBorrowAsset().wadMul(_params.triggerHF.wadDiv(currentHF));
+    uint256 triggerPrice = _params.exchange.getExchangeRate(address(asset), address(_borrowAsset)).wadMul(
+      _params.triggerHF.wadDiv(currentHF)
+    );
     // This triggerPrice doesn't take into account the interest rate of the borrowAsset neither the deposit interest
     // rate of the collateral. Can be improved in the future, but with a triggerHF at 1.01 we shouldn't be at
     // liquidation risk
 
     uint256 payout = _assetBalance().wadMul(
       _params.safeHF.wadDiv(_params.triggerHF) - WadRayMath.wad()
-    ) / 10**(asset.decimals() - _borrowAsset.decimals()); // TODO: what if asset.decimals() < _borrowAsset.decimals()?
-    payout =
-      (payout * triggerPrice + 10**_borrowAsset.decimals() / 2) /
-      10**_borrowAsset.decimals();
+    ).wadMul(triggerPrice);
     (uint256 policyPrice, ) = _priceInsurance.pricePolicy(
       triggerPrice,
       true,
@@ -372,14 +374,8 @@ abstract contract AaveHodlerVault is
     view
     returns (uint256 currentDebt, uint256 targetDebt)
   {
-    IPriceOracle oracle = IPriceOracle(_aave.getAddressesProvider().getPriceOracle());
-    uint256 collateralInEth = (IERC20Metadata(_aave.getReserveData(address(asset)).aTokenAddress)
-      .balanceOf(address(this)) * oracle.getAssetPrice(address(asset))) / 10**asset.decimals();
-    targetDebt =
-      collateralInEth.percentMul(_liqThreshold()).wadDiv(targetHF).wadDiv(
-        oracle.getAssetPrice(address(_borrowAsset))
-      ) /
-      10**(18 - _borrowAsset.decimals());
+    uint256 assetBalance = _assetBalance();
+    targetDebt = _convertAssetToBorrow(assetBalance.percentMul(_liqThreshold()).wadDiv(targetHF));
     return (_borrowAssetDebt(), targetDebt);
   }
 
@@ -390,33 +386,11 @@ abstract contract AaveHodlerVault is
     return variableDebtToken.balanceOf(address(this));
   }
 
-  function _collPriceInBorrowAsset() internal view returns (uint256) {
-    IPriceOracle oracle = IPriceOracle(_aave.getAddressesProvider().getPriceOracle());
-    uint256 exchangeRate = oracle.getAssetPrice(address(asset)).wadDiv(
-      oracle.getAssetPrice(address(_borrowAsset))
-    );
-    uint8 decFrom = asset.decimals();
-    uint8 decTo = _borrowAsset.decimals();
-    if (decFrom > decTo) {
-      exchangeRate /= 10**(decFrom - decTo);
-    } else {
-      exchangeRate *= 10**(decTo - decFrom);
-    }
-    return exchangeRate;
+  function _convertBorrowToAsset(uint256 borrowAssetAmount) internal view returns (uint256) {
+    return _params.exchange.convert(address(_borrowAsset), address(asset), borrowAssetAmount);
   }
 
-  function _convertBorrowToAsset(uint256 borrowAssetAmount) internal view returns (uint256) {
-    IPriceOracle oracle = IPriceOracle(_aave.getAddressesProvider().getPriceOracle());
-    uint256 exchangeRate = oracle.getAssetPrice(address(_borrowAsset)).wadDiv(
-      oracle.getAssetPrice(address(asset))
-    );
-    uint8 decFrom = _borrowAsset.decimals();
-    uint8 decTo = asset.decimals();
-    if (decFrom > decTo) {
-      exchangeRate /= 10**(decFrom - decTo);
-    } else {
-      exchangeRate *= 10**(decTo - decFrom);
-    }
-    return borrowAssetAmount.wadMul(exchangeRate);
+  function _convertAssetToBorrow(uint256 assetAmount) internal view returns (uint256) {
+    return _params.exchange.convert(address(asset), address(_borrowAsset), assetAmount);
   }
 }

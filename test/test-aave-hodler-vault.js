@@ -122,7 +122,7 @@ describe("Test AaveHodlerVault contract - run at https://polygonscan.com/block/2
 
   it("Should build an empty vault", async function() {
     const vault = await hre.upgrades.deployProxy(EnsuroLPAaveHodlerVault, [
-      [_W("1.02"), _W("1.10"), _W("1.2"), _W("1.3"), _W("0.01"), ADDRESSES.sushi, 24 * 3600, 0],
+      [_W("1.02"), _W("1.10"), _W("1.2"), _W("1.3"), exchange.address, 24 * 3600, 0],
       etk.address
     ], {
       kind: 'uups',
@@ -152,7 +152,7 @@ describe("Test AaveHodlerVault contract - run at https://polygonscan.com/block/2
 
   it("Should deposit and withdraw asset without checkpoint", async function() {
     const vault = await hre.upgrades.deployProxy(EnsuroLPAaveHodlerVault, [
-      [_W("1.02"), _W("1.10"), _W("1.2"), _W("1.3"), _W("0.01"), ADDRESSES.sushi, 24 * 3600, 0],
+      [_W("1.02"), _W("1.10"), _W("1.2"), _W("1.3"), exchange.address, 24 * 3600, 0],
       etk.address
     ], {
       kind: 'uups',
@@ -189,7 +189,7 @@ describe("Test AaveHodlerVault contract - run at https://polygonscan.com/block/2
 
   it("Should deposit and withdraw asset invest checkpoint policy reduced", async function() {
     const vault = await hre.upgrades.deployProxy(EnsuroLPAaveHodlerVault, [
-      [_W("1.02"), _W("1.10"), _W("1.2"), _W("1.3"), _W("0.01"), ADDRESSES.sushi, 24 * 3600, 0],
+      [_W("1.02"), _W("1.10"), _W("1.2"), _W("1.3"), exchange.address, 24 * 3600, 0],
       etk.address
     ], {
       kind: 'uups',
@@ -238,7 +238,7 @@ describe("Test AaveHodlerVault contract - run at https://polygonscan.com/block/2
 
   it("Should deposit and withdraw asset invest checkpoint policy standard", async function() {
     const vault = await hre.upgrades.deployProxy(EnsuroLPAaveHodlerVault, [
-      [_W("1.02"), _W("1.05"), _W("1.2"), _W("1.3"), _W("0.01"), ADDRESSES.sushi, 24 * 3600, 0],
+      [_W("1.02"), _W("1.05"), _W("1.2"), _W("1.3"), exchange.address, 24 * 3600, 0],
       etk.address
     ], {
       kind: 'uups',
