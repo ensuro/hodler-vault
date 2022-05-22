@@ -117,11 +117,12 @@ describe("Test AaveHodlerVault contract - run at https://polygonscan.com/block/2
     );
 
     tokenInterestRate = await etk.tokenInterestRate();
+    expect(tokenInterestRate).to.closeTo(_R(0.12), _R(0.00001));
   });
 
   it("Should build an empty vault", async function() {
     const vault = await hre.upgrades.deployProxy(EnsuroLPAaveHodlerVault, [
-      [_W("1.02"), _W("1.10"), _W("1.2"), _W("1.3"), _W("0.01"), ADDRESSES.sushi, 24 * 3600],
+      [_W("1.02"), _W("1.10"), _W("1.2"), _W("1.3"), _W("0.01"), ADDRESSES.sushi, 24 * 3600, 0],
       etk.address
     ], {
       kind: 'uups',
@@ -151,7 +152,7 @@ describe("Test AaveHodlerVault contract - run at https://polygonscan.com/block/2
 
   it("Should deposit and withdraw asset without checkpoint", async function() {
     const vault = await hre.upgrades.deployProxy(EnsuroLPAaveHodlerVault, [
-      [_W("1.02"), _W("1.10"), _W("1.2"), _W("1.3"), _W("0.01"), ADDRESSES.sushi, 24 * 3600],
+      [_W("1.02"), _W("1.10"), _W("1.2"), _W("1.3"), _W("0.01"), ADDRESSES.sushi, 24 * 3600, 0],
       etk.address
     ], {
       kind: 'uups',
@@ -188,7 +189,7 @@ describe("Test AaveHodlerVault contract - run at https://polygonscan.com/block/2
 
   it("Should deposit and withdraw asset invest checkpoint policy reduced", async function() {
     const vault = await hre.upgrades.deployProxy(EnsuroLPAaveHodlerVault, [
-      [_W("1.02"), _W("1.10"), _W("1.2"), _W("1.3"), _W("0.01"), ADDRESSES.sushi, 24 * 3600],
+      [_W("1.02"), _W("1.10"), _W("1.2"), _W("1.3"), _W("0.01"), ADDRESSES.sushi, 24 * 3600, 0],
       etk.address
     ], {
       kind: 'uups',
@@ -237,7 +238,7 @@ describe("Test AaveHodlerVault contract - run at https://polygonscan.com/block/2
 
   it("Should deposit and withdraw asset invest checkpoint policy standard", async function() {
     const vault = await hre.upgrades.deployProxy(EnsuroLPAaveHodlerVault, [
-      [_W("1.02"), _W("1.05"), _W("1.2"), _W("1.3"), _W("0.01"), ADDRESSES.sushi, 24 * 3600],
+      [_W("1.02"), _W("1.05"), _W("1.2"), _W("1.3"), _W("0.01"), ADDRESSES.sushi, 24 * 3600, 0],
       etk.address
     ], {
       kind: 'uups',
@@ -279,6 +280,8 @@ describe("Test AaveHodlerVault contract - run at https://polygonscan.com/block/2
     receipt = await tx.wait();
     const PolicyPool = await ethers.getContractFactory("PolicyPool");
     const newPolicyEvt = getTransactionEvent(PolicyPool.interface, receipt, "NewPolicy");
+    expect(newPolicyEvt.args.policy.id).to.be.equal(await vault.activePolicyId());
+    expect(newPolicyEvt.args.policy.expiration).to.be.equal(await vault.activePolicyExpiration());
     expect(newPolicyEvt.args.policy.premium).to.be.equal(1631);
     expect(newPolicyEvt.args.policy.payout).to.be.closeTo(expectedPayout, _A(0.001));
     expect(newPolicyEvt.args.policy.purePremium).to.be.closeTo(
@@ -286,5 +289,19 @@ describe("Test AaveHodlerVault contract - run at https://polygonscan.com/block/2
     );
 
     expect((await vault.totalAssets()).lt(totalAssets)).to.be.true;
+
+    // After 24 hours, new policy expires
+    await network.provider.send("evm_increaseTime", [3600 * 24])
+    await network.provider.send("evm_mine") // this one will have 02:00 PM as its timestamp
+    tx = await pool.expirePolicy(newPolicyEvt.args.policy);
+    receipt = await tx.wait();
+    const renewPolicyEvt = getTransactionEvent(PolicyPool.interface, receipt, "NewPolicy");
+    expect(newPolicyEvt.args.policy.id).not.to.be.equal(renewPolicyEvt.args.policy.id);
+    expect(renewPolicyEvt.args.policy.id).to.be.equal(await vault.activePolicyId());
+    expect(renewPolicyEvt.args.policy.premium).to.be.closeTo(_A(0.001631), _A(0.00001));
+    expect(renewPolicyEvt.args.policy.payout).to.be.closeTo(expectedPayout, _A(0.001));
+    expect(renewPolicyEvt.args.policy.purePremium).to.be.closeTo(
+      _A(0.913779 * (1.02/1.3) * 100 * (1.05/1.02 - 1) * 0.0005), _A(0.001)
+    );
   });
 });

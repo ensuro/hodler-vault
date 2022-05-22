@@ -55,6 +55,11 @@ abstract contract AaveHodlerVault is
   /// @custom:oz-upgrades-unsafe-allow state-variable-immutable
   IERC20Metadata internal immutable _borrowAsset;
 
+  enum OnPayoutStrategy {
+    buyTheDip, // Uses the payout money to buy more asset, deposited into AAVE to increase HF
+    repay // repays the borrowAsset debt
+  }
+
   struct Parameters {
     uint256 triggerHF;
     uint256 safeHF;
@@ -63,6 +68,7 @@ abstract contract AaveHodlerVault is
     uint256 maxSlippage;
     IUniswapV2Router02 swapRouter;
     uint40 policyDuration;
+    OnPayoutStrategy payoutStrategy;
   }
 
   Parameters internal _params;
@@ -229,8 +235,10 @@ abstract contract AaveHodlerVault is
     address operator,
     address from,
     uint256 policyId
-  ) external pure override returns (bytes4) {
-    // TODO renew policy
+  ) external override returns (bytes4) {
+    // TODO: do I need to validate the call comes from the pool?
+    // Since insure it's an open end-point I don't think so
+    insure(false);
     return IPolicyHolder.onPolicyExpired.selector;
   }
 
@@ -287,7 +295,7 @@ abstract contract AaveHodlerVault is
     return _activePolicyExpiration > (block.timestamp + _params.policyDuration / 1000);
   }
 
-  function insure(bool forced) external {
+  function insure(bool forced) public {
     require(!forced || owner() == _msgSender(), "Only the owner can force");
     // Active policy not yet expired - _params.policyDuration is to allow some overlap (<90 secs in 1 day)
     if (_hasActivePolicy()) return;
@@ -343,6 +351,10 @@ abstract contract AaveHodlerVault is
 
   function activePolicyId() external view returns (uint256) {
     return _activePolicyId;
+  }
+
+  function activePolicyExpiration() external view returns (uint40) {
+    return _activePolicyExpiration;
   }
 
   function totalInvested() public view virtual returns (uint256);
